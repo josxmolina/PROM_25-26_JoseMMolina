@@ -4,6 +4,7 @@ import 'package:flutter_1/widgets/appbar_widget.dart';
 import 'dart:math';
 import 'dart:async';
 import '../drawer_menu.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class RandomImageGame extends StatefulWidget {
   const RandomImageGame({super.key});
@@ -14,39 +15,125 @@ class RandomImageGame extends StatefulWidget {
 
 class _RandomImageGameState extends State<RandomImageGame> {
   int points = 0;
-  int timePerImage = 2; // Tiempo en segundos para pulsar cada imagen
-  int timeRemaining = 2;
-  double imageX = 0.0;
-  double imageY = 0.0;
+  int timePerImage = 4;
+  int timeRemaining = 4;
+  double imageX = 100.0;
+  double imageY = 200.0;
   Timer? _imageTimer;
   bool gameActive = true;
   int totalImages = 0;
+  Timer? _saveTimer;
+
+  final double imageSize = 80.0;
 
   @override
   void initState() {
     super.initState();
-    generateRandomPosition();
-    startImageTimer();
+    _cargarDatos().then((_) {
+      if (mounted) {
+        Future.delayed(Duration.zero, () {
+          if (totalImages == 0) {
+            generateRandomPosition();
+          }
+          startImageTimer();
+        });
+      }
+    });
+  }
+
+  Future<void> _cargarDatos() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        points = prefs.getInt('game_points') ?? 0;
+        totalImages = prefs.getInt('game_totalImages') ?? 0;
+        imageX = prefs.getDouble('last_imageX') ?? 100.0;
+        imageY = prefs.getDouble('last_imageY') ?? 200.0;
+        timeRemaining = prefs.getInt('time_remaining') ?? timePerImage;
+      });
+
+      // Clamp restored position to current screen after first frame
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final screenWidth = MediaQuery.of(context).size.width;
+        final screenHeight = MediaQuery.of(context).size.height;
+        final sidePadding = 20.0;
+        final topPadding = 150.0;
+        final bottomPadding = 180.0;
+        final maxX = screenWidth - (sidePadding * 2) - imageSize;
+        final maxY = screenHeight - topPadding - bottomPadding - imageSize;
+        setState(() {
+          if (imageX < sidePadding || imageX > maxX) imageX = sidePadding + (maxX / 2);
+          if (imageY < topPadding || imageY > maxY) imageY = topPadding + (maxY / 2);
+          if (timeRemaining > timePerImage || timeRemaining < 0) timeRemaining = timePerImage;
+        });
+      });
+    } catch (e) {
+      // If prefs fail, keep defaults and continue
+    }
+  }
+
+  Future<void> _guardarDatos() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('game_points', points);
+      await prefs.setInt('game_totalImages', totalImages);
+      await prefs.setDouble('last_imageX', imageX);
+      await prefs.setDouble('last_imageY', imageY);
+      await prefs.setInt('time_remaining', timeRemaining);
+    } catch (e) {
+      // ignore save errors
+    }
+  }
+
+  Future<void> _limpiarDatos() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('game_points');
+      await prefs.remove('game_totalImages');
+      await prefs.remove('last_imageX');
+      await prefs.remove('last_imageY');
+      await prefs.remove('time_remaining');
+    } catch (e) {
+      // ignore
+    }
   }
 
   void generateRandomPosition() {
+    if (!mounted) return;
+
     Random random = Random();
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+
+    final topPadding = 150.0;
+    final bottomPadding = 180.0;
+    final sidePadding = 20.0;
+
+    final availableWidth = screenWidth - (sidePadding * 2) - imageSize;
+    final availableHeight =
+        screenHeight - topPadding - bottomPadding - imageSize;
+
     setState(() {
-      // Posiciones aleatorias entre 0.1 y 0.8 para que la imagen no salga en los bordes
-      imageX = 0.1 + random.nextDouble() * 0.7;
-      imageY = 0.1 + random.nextDouble() * 0.6;
+      imageX = sidePadding + random.nextDouble() * availableWidth;
+      imageY = topPadding + random.nextDouble() * availableHeight;
       timeRemaining = timePerImage;
       totalImages++;
     });
   }
 
   void startImageTimer() {
+    _imageTimer?.cancel();
     _imageTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       setState(() {
         if (timeRemaining > 0) {
           timeRemaining--;
         } else {
-          // No se pulsó a tiempo, restar 2 puntos
           points -= 2;
           generateRandomPosition();
         }
@@ -55,33 +142,48 @@ class _RandomImageGameState extends State<RandomImageGame> {
   }
 
   void onImageTap() {
-    if (gameActive) {
+    if (gameActive && mounted) {
       setState(() {
-        points++; // Sumar 1 punto
+        points++;
       });
-      _imageTimer?.cancel();
+      _scheduleSave();
       generateRandomPosition();
-      startImageTimer();
     }
   }
 
   void restartGame() {
-    setState(() {
-      points = 0;
-      totalImages = 0;
-      timeRemaining = timePerImage;
-      gameActive = true;
-    });
     _imageTimer?.cancel();
-    generateRandomPosition();
-    startImageTimer();
+    // Make restart async so we wait until prefs are cleared
+    () async {
+      await _limpiarDatos();
+      if (!mounted) return;
+      setState(() {
+        points = 0;
+        totalImages = 0;
+        timeRemaining = timePerImage;
+        gameActive = true;
+      });
+      generateRandomPosition();
+      startImageTimer();
+    }();
   }
 
   @override
   void dispose() {
+    // Ensure any pending save completes
+    _saveTimer?.cancel();
+    _guardarDatos();
     _imageTimer?.cancel();
     super.dispose();
   }
+
+  void _scheduleSave({Duration delay = const Duration(milliseconds: 500)}) {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(delay, () {
+      _guardarDatos();
+    });
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -89,11 +191,10 @@ class _RandomImageGameState extends State<RandomImageGame> {
       backgroundColor: Theme.of(context).brightness == Brightness.light
           ? AppColorsLight.background
           : AppColorsDark.background,
-      drawer: DrawerMenu(),
-      appBar: AppbarWidget(title: "Juego imagen random"),
+      drawer: const DrawerMenu(),
+      appBar: const AppbarWidget(title: "Juego imagen random"),
       body: Stack(
         children: [
-          // Información superior
           Positioned(
             top: 20,
             left: 0,
@@ -123,7 +224,7 @@ class _RandomImageGameState extends State<RandomImageGame> {
                         : AppColorsDark.text,
                   ),
                 ),
-                SizedBox(height: 5),
+                const SizedBox(height: 5),
                 Text(
                   'Imágenes: $totalImages',
                   style: TextStyle(
@@ -137,21 +238,20 @@ class _RandomImageGameState extends State<RandomImageGame> {
             ),
           ),
 
-          // Imagen en posición aleatoria
           Positioned(
-            left: MediaQuery.of(context).size.width * imageX,
-            top: MediaQuery.of(context).size.height * imageY,
+            left: imageX,
+            top: imageY,
             child: GestureDetector(
               onTap: onImageTap,
               child: Container(
-                width: 80,
-                height: 80,
+                width: imageSize,
+                height: imageSize,
                 decoration: BoxDecoration(
                   color: Colors.orange,
                   shape: BoxShape.circle,
-                  boxShadow: [
+                  boxShadow: const [
                     BoxShadow(
-                      color: Colors.black,
+                      color: Colors.black26,
                       blurRadius: 10,
                       spreadRadius: 2,
                     ),
@@ -162,7 +262,6 @@ class _RandomImageGameState extends State<RandomImageGame> {
             ),
           ),
 
-          // Botón de reinicio
           Positioned(
             bottom: 30,
             left: 0,
@@ -185,7 +284,6 @@ class _RandomImageGameState extends State<RandomImageGame> {
             ),
           ),
 
-          // Instrucciones
           Positioned(
             bottom: 90,
             left: 0,
@@ -197,7 +295,9 @@ class _RandomImageGameState extends State<RandomImageGame> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(10),
-                  boxShadow: [BoxShadow(color: Colors.black, blurRadius: 5)],
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 5),
+                  ],
                 ),
                 child: const Text(
                   '¡Pulsa la estrella antes de que desaparezca!\n+1 punto si pulsas | -2 puntos si no pulsas',
